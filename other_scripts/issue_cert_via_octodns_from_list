@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  issue_cert_via_octodns_from_list [options] [--domains-file <path>]
+  issue_cert_via_octodns_from_list [options] < domains.txt
+
+Domain list format:
+  - one hostname per line
+  - wildcard hostnames are allowed as the left-most label, e.g. *.web.nos.pt
+  - first line is primary domain
+  - remaining lines become SANS
+
+Options:
+  --domains-file <path>      Read domain list from file (otherwise stdin)
+  --octodns-repo <path>      Default: /home/user/dsi-octoDNS
+  --zone <zone>              Default: corporativo.pt
+  --octodns-config <path>    Default: config/config_yaml_prd.yaml
+  --environment <name>       Default: prd
+  --auth-dns-server <host>   Default: kianchau.ns.cloudflare.com
+  --export-base <path>       Default: /mnt/c/Users/frabsantos/OneDrive - NOS SGPS, S.A/Documents/certeficados
+  --date <YYYY-MM-DD>        Default: today
+  -h, --help
+EOF
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+set_or_add_cfg_key() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local escaped
+  escaped="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g')"
+
+  if grep -q "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=\"${escaped}\"|" "$file"
+  else
+    printf '%s="%s"\n' "$key" "$value" >> "$file"
+  fi
+}
+
+validate_hostname() {
+  local h="$1"
+  if [[ "$h" == \*.* ]]; then
+    h="${h#\*.}"
+  fi
+  [[ "$h" != *"*"* ]] || return 1
+  [[ "$h" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+DOMAINS_FILE=""
+OCTODNS_REPO="/home/user/dsi-octoDNS"
+OCTODNS_ZONE="corporativo.pt"
+OCTODNS_CONFIG="config/config_yaml_prd.yaml"
+OCTODNS_ENVIRONMENT="prd"
+AUTH_DNS_SERVER="kianchau.ns.cloudflare.com"
+EXPORT_BASE="/mnt/c/Users/frabsantos/OneDrive - NOS SGPS, S.A/Documents/certeficados"
+OUT_DATE="$(date +%F)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --domains-file) DOMAINS_FILE="$2"; shift 2 ;;
+    --octodns-repo) OCTODNS_REPO="$2"; shift 2 ;;
+    --zone) OCTODNS_ZONE="$2"; shift 2 ;;
+    --octodns-config) OCTODNS_CONFIG="$2"; shift 2 ;;
+    --environment) OCTODNS_ENVIRONMENT="$2"; shift 2 ;;
+    --auth-dns-server) AUTH_DNS_SERVER="$2"; shift 2 ;;
+    --export-base) EXPORT_BASE="$2"; shift 2 ;;
+    --date) OUT_DATE="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+GETSSL_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+GETSSL_BIN="${GETSSL_ROOT}/getssl"
+WRAPPER="${SCRIPT_DIR}/issue_cert_via_octodns"
+
+[[ -x "$GETSSL_BIN" ]] || { echo "getssl binary not found: $GETSSL_BIN" >&2; exit 1; }
+[[ -x "$WRAPPER" ]] || { echo "wrapper not found/executable: $WRAPPER" >&2; exit 1; }
+
+declare -a domains=()
+read_input() {
+  local src="$1"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//$'\r'/}"
+    line="$(trim "$line")"
+    [[ -z "$line" ]] && continue
+    line="${line%\"}"
+    line="${line#\"}"
+    line="${line%\'}"
+    line="${line#\'}"
+    line="$(trim "$line")"
+    [[ -z "$line" ]] && continue
+    if ! validate_hostname "$line"; then
+      echo "invalid hostname in list: $line" >&2
+      exit 2
+    fi
+    domains+=("$line")
+  done < "$src"
+}
+
+if [[ -n "$DOMAINS_FILE" ]]; then
+  [[ -f "$DOMAINS_FILE" ]] || { echo "domains file not found: $DOMAINS_FILE" >&2; exit 1; }
+  read_input "$DOMAINS_FILE"
+else
+  if [[ -t 0 ]]; then
+    echo "No --domains-file and no stdin provided." >&2
+    usage
+    exit 2
+  fi
+  read_input /dev/stdin
+fi
+
+if [[ ${#domains[@]} -eq 0 ]]; then
+  echo "domain list is empty" >&2
+  exit 2
+fi
+
+primary="${domains[0]}"
+sans=""
+if [[ ${#domains[@]} -gt 1 ]]; then
+  sans="$(IFS=,; echo "${domains[*]:1}")"
+fi
+
+domain_dir="$HOME/.getssl/$primary"
+domain_cfg="$domain_dir/getssl.cfg"
+
+if [[ ! -f "$domain_cfg" ]]; then
+  (
+    cd "$GETSSL_ROOT"
+    ./getssl -c "$primary"
+  )
+fi
+
+[[ -f "$domain_cfg" ]] || { echo "could not create domain config: $domain_cfg" >&2; exit 1; }
+
+set_or_add_cfg_key "$domain_cfg" "SANS" "$sans"
+set_or_add_cfg_key "$domain_cfg" "CA" "https://acme-v02.api.letsencrypt.org/directory"
+set_or_add_cfg_key "$domain_cfg" "VALIDATE_VIA_DNS" "true"
+set_or_add_cfg_key "$domain_cfg" "DNS_ADD_COMMAND" "${GETSSL_ROOT}/dns_scripts/dns_add_octodns"
+set_or_add_cfg_key "$domain_cfg" "DNS_DEL_COMMAND" "${GETSSL_ROOT}/dns_scripts/dns_del_octodns"
+set_or_add_cfg_key "$domain_cfg" "AUTH_DNS_SERVER" "$AUTH_DNS_SERVER"
+set_or_add_cfg_key "$domain_cfg" "CHECK_REMOTE" "false"
+
+exec "$WRAPPER" \
+  --primary-domain "$primary" \
+  --octodns-repo "$OCTODNS_REPO" \
+  --zone "$OCTODNS_ZONE" \
+  --octodns-config "$OCTODNS_CONFIG" \
+  --environment "$OCTODNS_ENVIRONMENT" \
+  --export-base "$EXPORT_BASE" \
+  --date "$OUT_DATE"

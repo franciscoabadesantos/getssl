@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: dns_del_octodns <domain> <token>" >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/octodns_hook_common.sh"
+
+domain="$1"
+token="$2"
+fqdn="$(octodns_normalize_domain "$domain")"
+
+octodns_require_paths
+octodns_mutate "delete" "$fqdn" "$token"
+octodns_gate_and_apply "del" "$fqdn" "$token"

@@ -10,3 +10,8 @@ JSON.sh
 .vscode/settings.json
 push.json
 bin/
+.venv-certbot/
+.certbot/
+.certbot-hooks/
+__pycache__/
+*.py[cod]

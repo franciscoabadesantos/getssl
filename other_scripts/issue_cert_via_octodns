@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  issue_cert_via_octodns --primary-domain <fqdn> [options]
+
+Options:
+  --octodns-repo <path>      Default: /home/user/dsi-octoDNS
+  --zone <zone>              Default: corporativo.pt
+  --octodns-config <path>    Default: config/config_yaml_prd.yaml
+  --environment <name>       Default: prd
+  --export-base <path>       Default: /mnt/c/Users/frabsantos/OneDrive - NOS SGPS, S.A/Documents/certeficados
+  --date <YYYY-MM-DD>        Default: today
+  -h, --help
+EOF
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+extract_sans() {
+  local cfg="$1"
+  local raw
+  raw="$(awk -F= '/^SANS=/{line=$0} END{print line}' "$cfg")"
+  raw="${raw#SANS=}"
+  raw="$(trim "$raw")"
+  raw="${raw%\"}"
+  raw="${raw#\"}"
+  printf '%s' "$raw"
+}
+
+build_hosts() {
+  local primary="$1"
+  local sans="$2"
+  local -n _out="$3"
+
+  declare -A seen=()
+  _out=()
+  seen["$primary"]=1
+  _out+=("$primary")
+
+  if [[ -n "$sans" ]]; then
+    IFS=',' read -r -a items <<<"$sans"
+    for i in "${items[@]}"; do
+      i="$(trim "$i")"
+      [[ -z "$i" ]] && continue
+      if [[ -z "${seen[$i]:-}" ]]; then
+        seen["$i"]=1
+        _out+=("$i")
+      fi
+    done
+  fi
+}
+
+export_artifacts() {
+  local primary="$1"
+  local export_base="$2"
+  local out_date="$3"
+  shift 3
+  local hosts=("$@")
+
+  local cert_dir="$HOME/.getssl/$primary"
+  local cert_src="$cert_dir/fullchain.crt"
+  local key_src="$cert_dir/${primary}.key"
+
+  [[ -f "$cert_src" ]] || { echo "missing certificate: $cert_src" >&2; return 1; }
+  [[ -f "$key_src" ]] || { echo "missing key: $key_src" >&2; return 1; }
+
+  local out_dir="$export_base/$out_date"
+  mkdir -p "$out_dir"
+
+  local h
+  for h in "${hosts[@]}"; do
+    cp "$cert_src" "$out_dir/$h.cert"
+    cp "$key_src" "$out_dir/$h.key"
+    {
+      echo "# Domain: $h"
+      echo "# SAN certificate (fullchain) + private key"
+      echo
+      echo "-----BEGIN CERTIFICATE BLOCK-----"
+      cat "$cert_src"
+      echo "-----END CERTIFICATE BLOCK-----"
+      echo
+      echo "-----BEGIN PRIVATE KEY BLOCK-----"
+      cat "$key_src"
+      echo "-----END PRIVATE KEY BLOCK-----"
+    } > "$out_dir/$h.txt"
+  done
+
+  echo "Artifacts exported to: $out_dir"
+}
+
+PRIMARY_DOMAIN=""
+OCTODNS_REPO="/home/user/dsi-octoDNS"
+OCTODNS_ZONE="corporativo.pt"
+OCTODNS_CONFIG="config/config_yaml_prd.yaml"
+OCTODNS_ENVIRONMENT="prd"
+EXPORT_BASE="/mnt/c/Users/frabsantos/OneDrive - NOS SGPS, S.A/Documents/certeficados"
+OUT_DATE="$(date +%F)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --primary-domain) PRIMARY_DOMAIN="$2"; shift 2 ;;
+    --octodns-repo) OCTODNS_REPO="$2"; shift 2 ;;
+    --zone) OCTODNS_ZONE="$2"; shift 2 ;;
+    --octodns-config) OCTODNS_CONFIG="$2"; shift 2 ;;
+    --environment) OCTODNS_ENVIRONMENT="$2"; shift 2 ;;
+    --export-base) EXPORT_BASE="$2"; shift 2 ;;
+    --date) OUT_DATE="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ -n "$PRIMARY_DOMAIN" ]] || { echo "--primary-domain is required" >&2; usage; exit 2; }
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+GETSSL_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+DOMAIN_CFG="$HOME/.getssl/$PRIMARY_DOMAIN/getssl.cfg"
+
+[[ -f "$DOMAIN_CFG" ]] || { echo "domain config not found: $DOMAIN_CFG" >&2; exit 1; }
+[[ -x "$GETSSL_ROOT/getssl" ]] || { echo "getssl binary not found at $GETSSL_ROOT/getssl" >&2; exit 1; }
+
+if [[ -z "${CLOUDFLARE_TOKEN:-}" && -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  export CLOUDFLARE_TOKEN="$CLOUDFLARE_API_TOKEN"
+fi
+
+export GETSSL_OCTODNS_REPO="$OCTODNS_REPO"
+export GETSSL_OCTODNS_ZONE="$OCTODNS_ZONE"
+export GETSSL_OCTODNS_CONFIG="$OCTODNS_CONFIG"
+export GETSSL_OCTODNS_ENVIRONMENT="$OCTODNS_ENVIRONMENT"
+
+if [[ -x "${OCTODNS_REPO}/.venv/bin/octodns-sync" ]]; then
+  export GETSSL_OCTODNS_SYNC_BIN="${OCTODNS_REPO}/.venv/bin/octodns-sync"
+fi
+if [[ -x "${OCTODNS_REPO}/.venv/bin/python" ]]; then
+  export GETSSL_OCTODNS_PYTHON_BIN="${OCTODNS_REPO}/.venv/bin/python"
+fi
+
+sans="$(extract_sans "$DOMAIN_CFG")"
+hosts=()
+build_hosts "$PRIMARY_DOMAIN" "$sans" hosts
+
+(
+  cd "$GETSSL_ROOT"
+  ./getssl "$PRIMARY_DOMAIN"
+)
+
+export_artifacts "$PRIMARY_DOMAIN" "$EXPORT_BASE" "$OUT_DATE" "${hosts[@]}"
