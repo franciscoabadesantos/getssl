@@ -66,4 +66,16 @@ run_expect_fail "add reject wrong record" add "example.corporativo.pt" "abc123" 
 run_expect_ok "del ok" del "example.corporativo.pt" "abc123" "$TMP_DIR/del_ok.plan"
 run_expect_fail "del reject counts" del "example.corporativo.pt" "abc123" "$TMP_DIR/del_bad_counts.plan"
 
+cat >"$TMP_DIR/add_noop.plan" <<'EOF'
+* No changes were planned
+EOF
+
+if "$GATE" --mode add --fqdn "example.corporativo.pt" --token "abc123" --allow-add-noop --plan-file "$TMP_DIR/add_noop.plan" >/dev/null; then
+  pass "add accepts confirmed no-op"
+else
+  fail "add accepts confirmed no-op"
+fi
+
+run_expect_fail "add rejects no-op without explicit permission" add "example.corporativo.pt" "abc123" "$TMP_DIR/add_noop.plan"
+
 echo "All plan gate tests passed."

@@ -43,38 +43,6 @@ else
 fi
 GETSSL_OCTODNS_PYTHON_BIN="${_octodns_python}"
 
-octodns_zone_file_path() {
-  local template
-  if [[ -n "${OCTODNS_ZONE_FILE_TEMPLATE:-}" ]]; then
-    template="${OCTODNS_ZONE_FILE_TEMPLATE}"
-  else
-    template="${GETSSL_OCTODNS_REPO}/config/zones/yaml/{zone}.yaml"
-  fi
-  local path
-  path="$(printf '%s' "$template" | sed \
-    -e "s#{environment}#${GETSSL_OCTODNS_ENVIRONMENT}#g" \
-    -e "s#{zone}#${GETSSL_OCTODNS_ZONE}#g")"
-  printf '%s\n' "$path"
-}
-
-
-octodns_sort_zone_file() {
-  local zone_file="$1"
-  "$GETSSL_OCTODNS_PYTHON_BIN" - "$zone_file" <<'PY'
-from pathlib import Path
-import sys
-
-from octodns.yaml import safe_dump, safe_load
-
-zone_file = Path(sys.argv[1])
-with zone_file.open() as fh:
-    data = safe_load(fh, enforce_order=False)
-with zone_file.open("w") as fh:
-    safe_dump(data, fh)
-PY
-}
-
-
 octodns_require_paths() {
   [[ -d "$GETSSL_OCTODNS_REPO" ]] || { echo "octodns repo not found: $GETSSL_OCTODNS_REPO" >&2; return 2; }
   [[ -f "$GETSSL_OCTODNS_REPO/$GETSSL_OCTODNS_CONFIG" ]] || {
@@ -96,8 +64,6 @@ octodns_mutate() {
   local action="$1"
   local fqdn="$2"
   local token="$3"
-  local zone_file
-  zone_file="$(octodns_zone_file_path)"
   # ACME dns-01 uses TXT records, which must not carry Cloudflare proxied metadata.
   "$GETSSL_OCTODNS_PYTHON_BIN" "$GETSSL_OCTODNS_MUTATE_BIN" \
     "$GETSSL_OCTODNS_ENVIRONMENT" \
@@ -109,7 +75,6 @@ octodns_mutate() {
     "$action" \
     "" \
     ""
-  octodns_sort_zone_file "$zone_file"
 }
 
 
@@ -142,6 +107,7 @@ octodns_gate_and_apply() {
   local mode="$1"
   local fqdn="$2"
   local token="$3"
+  local allow_add_noop="${4:-false}"
   local plan_file
   plan_file="$(mktemp)"
 
@@ -151,7 +117,11 @@ octodns_gate_and_apply() {
     return 1
   fi
 
-  if ! "$GETSSL_OCTODNS_GATE_BIN" --mode "$mode" --fqdn "$fqdn" --token "$token" --plan-file "$plan_file"; then
+  local gate_args=(--mode "$mode" --fqdn "$fqdn" --token "$token" --plan-file "$plan_file")
+  if [[ "$allow_add_noop" == "true" ]]; then
+    gate_args+=(--allow-add-noop)
+  fi
+  if ! "$GETSSL_OCTODNS_GATE_BIN" "${gate_args[@]}"; then
     cat "$plan_file" >&2 || true
     rm -f "$plan_file"
     return 1

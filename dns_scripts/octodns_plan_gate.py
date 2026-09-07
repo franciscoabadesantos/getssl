@@ -14,6 +14,7 @@ SUMMARY_RE = re.compile(
     re.IGNORECASE,
 )
 PLAN_LINE_RE = re.compile(r"^\*\s+(Create|Update|Delete)\s+<", re.MULTILINE)
+NO_CHANGES_RE = re.compile(r"^\*\s+No changes were planned\s*$", re.MULTILINE)
 
 
 def _normalize_fqdn(value: str) -> str:
@@ -25,7 +26,14 @@ def _fail(message: str) -> int:
     return 1
 
 
-def validate(mode: str, fqdn: str, token: str, plan_text: str) -> int:
+def validate(mode: str, fqdn: str, token: str, plan_text: str, allow_add_noop: bool = False) -> int:
+    if allow_add_noop and mode == "add":
+        summaries = SUMMARY_RE.findall(plan_text)
+        actions = PLAN_LINE_RE.findall(plan_text)
+        no_change_markers = NO_CHANGES_RE.findall(plan_text)
+        if not summaries and not actions and len(no_change_markers) == 1:
+            return 0
+
     summaries = SUMMARY_RE.findall(plan_text)
     if len(summaries) != 1:
         return _fail(f"expected exactly one Summary line, got {len(summaries)}")
@@ -65,6 +73,11 @@ def main() -> int:
     parser.add_argument("--mode", choices=["add", "del"], required=True)
     parser.add_argument("--fqdn", required=True, help="Challenge domain (without _acme-challenge prefix).")
     parser.add_argument("--token", default="", help="Expected TXT token (required for add mode).")
+    parser.add_argument(
+        "--allow-add-noop",
+        action="store_true",
+        help="Accept a strict no-change add plan after the mutator confirmed the TXT already exists.",
+    )
     parser.add_argument("--plan-file", required=True)
     args = parser.parse_args()
 
@@ -73,7 +86,7 @@ def main() -> int:
         return _fail(f"plan file not found: {plan_path}")
 
     text = plan_path.read_text(encoding="utf-8", errors="replace")
-    return validate(args.mode, args.fqdn, args.token, text)
+    return validate(args.mode, args.fqdn, args.token, text, args.allow_add_noop)
 
 
 if __name__ == "__main__":

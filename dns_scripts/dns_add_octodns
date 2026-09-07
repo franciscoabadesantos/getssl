@@ -15,5 +15,12 @@ token="$2"
 fqdn="$(octodns_normalize_domain "$domain")"
 
 octodns_require_paths
-octodns_mutate "create" "$fqdn" "$token"
-octodns_gate_and_apply "add" "$fqdn" "$token"
+mutation_result="$(octodns_mutate "create" "$fqdn" "$token")"
+printf '%s\n' "$mutation_result"
+
+allow_add_noop=false
+if [[ "$mutation_result" == *'"changed": false'* && "$mutation_result" == *'No-op: TXT record already exists'* ]]; then
+  allow_add_noop=true
+fi
+
+octodns_gate_and_apply "add" "$fqdn" "$token" "$allow_add_noop"
